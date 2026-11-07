@@ -1,0 +1,211 @@
+__Name__ = 'Moravian Star'
+__Comment__ = 'A FreeCAD macro that creates a Moravian Star. It is a 12 point version of the star that is hollow.'
+__Author__ = 'Craig Drinnan'
+__Date__ = '2026-11-07'
+__Version__ = '2.2'
+__License__ = 'GPL-3.0-or-later'
+__Web__ = 'https://github.com/MomboMan/Moravian-Star-FCMacro'
+__Wiki__ = ''
+__Icon__ = ''
+__Xpm__ = ''
+__Help__ = ''
+__Status__ = 'Stable'
+__Requires__ = 'FreeCAD >= 26.3.0RC2 '
+__Communication__ = 'https://github.com/MomboMan/Moravian-Star-FCMacro/issues'
+__Files__ = ''
+
+import math
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+
+class MoravianStar:
+    def __init__(self, obj):
+
+        obj.addProperty("App::PropertyLength", "Radius", "Letter Dimensions", "Radius of the Star").Radius = 5.0
+        obj.addProperty("App::PropertyLength", "SpikeHeight", "Letter Dimensions", "Height of each spike").SpikeHeight = 40.0
+        obj.addProperty("App::PropertyInteger", "Sides", "Letter Dimensions", "Sides on each spike").Sides = 5
+        obj.addProperty("App::PropertyLength", "HoleDiameter", "Letter Dimensions", "Hole Diameter").HoleDiameter = 5.0
+        obj.addProperty("App::PropertyLength", "WallThickness", "Letter Dimensions", "Wall Thickness").WallThickness = 1.2
+        obj.addProperty("App::PropertyBool", "Hollow", "Letter Dimensions", "Hollow").Hollow = False
+        obj.addProperty("App::PropertyBool", "ThroughAll", "Letter Dimensions", "Through All").ThroughAll = False
+        obj.Proxy = self
+
+    def onChanged(self, fp, prop):
+        """Optional: Triggers when any property value updates."""
+        pass
+
+    def execute(self, obj):
+        try:
+            # Fetch current property values
+            base_radius = obj.Radius.Value
+            point_height = obj.SpikeHeight.Value
+            sides = obj.Sides
+            hole_diameter = obj.HoleDiameter.Value
+            wall_thickness = obj.WallThickness.Value
+            hollow = obj.Hollow
+            through_all = obj.ThroughAll
+
+            phi = (1.0 + math.sqrt(5.0)) / 2.0
+        
+            true_12_axes = [
+                (0, 1, phi),   (0, 1, -phi),  (0, -1, phi),  (0, -1, -phi),
+                (1, phi, 0),   (1, -phi, 0),  (-1, phi, 0),  (-1, -phi, 0),
+                (phi, 0, 1),   (phi, 0, -1),  (-phi, 0, 1),  (-phi, 0, -1)
+            ]
+            
+            # 1A. Build the solid outer spike pyramid
+            base_verts = []
+            for i in range(sides):
+                angle = i * (2 * math.pi / sides)
+                x_val = base_radius * math.cos(angle)
+                y_val = base_radius * math.sin(angle)
+                z_val = -base_radius * 0.5 if sides == 3 else 0.0
+                base_verts.append(App.Vector(x_val, y_val, z_val))
+            
+            tip = App.Vector(0, 0, point_height)
+            pyramid_faces = []
+            for i in range(sides):
+                v1 = base_verts[i]
+                v2 = base_verts[(i + 1) % sides]
+                wire = Part.Wire([Part.makeLine(v1, v2), Part.makeLine(v2, tip), Part.makeLine(tip, v1)])
+                pyramid_faces.append(Part.Face(wire))
+            
+            base_edges = [Part.makeLine(base_verts[i], base_verts[(i + 1) % sides]) for i in range(sides)]
+            pyramid_faces.append(Part.Face(Part.Wire(base_edges)))
+            outer_spike = Part.makeSolid(Part.makeShell(pyramid_faces))
+        
+            # 1B. Build a smaller inner pyramid tool to clear out the core
+            # Scale down the radius and height proportionally based on the wall thickness
+            scale_r = max(0.1, base_radius - wall_thickness)
+            scale_h = max(1.0, point_height - wall_thickness)
+            
+            inner_verts = []
+            for i in range(sides):
+                angle = i * (2 * math.pi / sides)
+                x_val = scale_r * math.cos(angle)
+                y_val = scale_r * math.sin(angle)
+                z_val = (-base_radius * 0.5) - 1.0 if sides == 3 else -1.0 # Extend slightly past base to ensure clear entry
+                inner_verts.append(App.Vector(x_val, y_val, z_val))
+                
+            if hollow:
+                inner_tip = App.Vector(0, 0, scale_h)
+                inner_faces = []
+                for i in range(sides):
+                    v1 = inner_verts[i]
+                    v2 = inner_verts[(i + 1) % sides]
+                    wire = Part.Wire([Part.makeLine(v1, v2), Part.makeLine(v2, inner_tip), Part.makeLine(inner_tip, v1)])
+                    inner_faces.append(Part.Face(wire))
+                    
+                inner_base_edges = [Part.makeLine(inner_verts[i], inner_verts[(i + 1) % sides]) for i in range(sides)]
+                inner_faces.append(Part.Face(Part.Wire(inner_base_edges)))
+                inner_void_tool = Part.makeSolid(Part.makeShell(inner_faces))
+        
+                # Cut the inner out of the outer to form a true hollow cup
+                single_point = outer_spike.cut(inner_void_tool)
+            else:
+                single_point = outer_spike
+            
+            star_shape = None
+            
+            # 2. Duplicate, rotate, and fuse the hollow cups into the 12 spatial directions
+            for ax in true_12_axes:
+                ax_x, ax_y, ax_z = ax[0], ax[1], ax[2]
+                target_direction = App.Vector(ax_x, ax_y, ax_z).normalize()
+                
+                spike = single_point.copy()
+                z_axis = App.Vector(0, 0, 1)
+                rotation_axis = z_axis.cross(target_direction)
+                
+                if rotation_axis.Length > 0.0001:
+                    rotation_axis.normalize()
+                    angle_deg = math.degrees(math.acos(z_axis.dot(target_direction)))
+                    spike.rotate(App.Vector(0,0,0), rotation_axis, angle_deg)
+                    
+                if star_shape is None:
+                    star_shape = spike
+                else:
+                    star_shape = star_shape.fuse(spike)
+                           
+            # 3. Cut out the post pocket if size parameters are greater than 0
+            if hole_diameter > 0:
+                hole_radius = hole_diameter / 2.0
+                if through_all == True:
+                    mount_tool = Part.makeCylinder(hole_radius, hole_radius*20, App.Vector(0, 0, -hole_radius*10), App.Vector(0, 0, 1), 360)
+                else:
+                    mount_tool = Part.makeCylinder(hole_radius, hole_radius*10, App.Vector(0, 0, -hole_radius*10), App.Vector(0, 0, 1), 360)
+                star_shape = star_shape.cut(mount_tool)
+        
+            obj.Shape = star_shape
+                        
+        except Exception as err:
+            _, _, exc_tb = sys.exc_info()
+            line_number = exc_tb.tb_lineno
+            App.Console.PrintError("Recalculation error: " + str(err) + " at line " + str(line_number) + "\n")
+
+class ViewProviderBox:
+    def __init__(self, obj):
+        """Initialize display variables and link view provider proxy."""
+        # Mandatory assignment binding
+        obj.Proxy = self
+
+    def attach(self, obj):
+        """Mandatory: Sets up the 3D scene subgraph (e.g., Coin3D groups)."""
+        pass
+
+    def getIcon(self):
+        """Optional: Standard 16x16 XPM icon string snippet for the tree view."""
+        return """
+        /* XPM */
+        static const char * moravian_star_shaded_xpm[] = {
+        "16 16 3 1",
+        "  c None",
+        ". c #141010",
+        "+ c #706F6F",
+        "       ..       ",
+        "       ..       ",
+        "      .+.       ",
+        "     .++.       ",
+        "    .+++.       ",
+        "   .++++.       ",
+        "  .++++++.      ",
+        ".....+..........",
+        "....+++.........",
+        "  .++++++.      ",
+        "   .++++.       ",
+        "    .+++.       ",
+        "     .++.       ",
+        "      .+.       ",
+        "       ..       ",
+        "       ..       "};
+        """
+        
+    def dumps(self):
+        """Mandatory persistence callback"""
+        return None
+
+    def loads(self, state):
+        """Mandatory persistence callback"""
+        return None
+
+# def build_moravian_star():
+doc = App.activeDocument()
+if not doc:
+    doc = App.newDocument("Unnamed")
+
+App.ActiveDocument.addObject('PartDesign::Body','Body')
+App.ActiveDocument.getObject('Body').Label = 'Body'
+App.ActiveDocument.getObject('Body').AllowCompound = True
+body = App.ActiveDocument.getObject('Body')
+
+doc.recompute()
+
+# 4. Output geometry straight to document tree
+moravian_star = doc.addObject("Part::FeaturePython", "MoravianStarBody")
+# .addObject(moravian_star)
+MoravianStar(moravian_star)
+        
+if App.GuiUp:
+    ViewProviderBox(moravian_star.ViewObject)
+
+doc.recompute()
